@@ -1,142 +1,197 @@
-//using System;
 
-using OQLWithReflectionDemo;
+
 using System.Collections;
-using System.Collections.Generic;
-using System.Net.Http.Headers;
+using System.Reflection;
 
-//var dataContext = CreateDataContext();
-
-//var query = "/workorders/abc";
-//var segments = query.Trim().Split('/')[1..];
-
-//var contextType = typeof(DataContext);
-
-//(Type type, object? obj) result;
-
-//for (int i = 0; i < segments.Length; i++)
-//{
-//	var current = segments[i];
-//	var next = (i + 1) < segments.Length ? segments[i + 1] : null;
-
-//	var property = contextType.GetProperties().SingleOrDefault(p => p.Name.ToLower() == current.ToLower());
-
-//	var isCollection = property != null && property.PropertyType.GetInterfaces().Contains(typeof(IEnumerable));
-//	var isObject = property != null && !property.PropertyType.GetInterfaces().Contains(typeof(IEnumerable));
-//	var isValue = !current.StartsWith("@") && !isCollection && !isObject;
-//	var isFunction = current.StartsWith('#');
-
-//	if (isCollection)
-//	{
-//		if (next is not null)
-//		{
-
-//		}
-//		else
-//		{
-//			result = (property.PropertyType, property.GetValue(dataContext));
-//		}
-//	}
-
-//	//Console.WriteLine($"isCollection: {isCollection}");
-//	//Console.WriteLine($"isObject: {isObject}");
-//	//Console.WriteLine($"isValue: {isValue}");
-//	//Console.WriteLine($"isFunction: {isFunction}");
-//}
-
-var workOrder = new WorkOrder() 
+var @object = new TestClass 
 { 
-	Number = "abc", 
-	Brand = new Brand 
+	Nested = new TestClass { Number = 1000 },
+	NestedCollection = new List<TestClass> 
 	{ 
-		Name = "HP" 
-	},
-	Products = new List<Product> 
-	{ 
-		new Product { SerialNo = "CZ001" },
-		new Product { SerialNo = "CZ002" },
-		new Product { SerialNo = "CZ003" }
+		new TestClass { Number = 1 },
+		new TestClass { Number = 2 },
+		new TestClass { Number = 3 },
+		new TestClass { Number = 4 },
+		new TestClass
+		{
+			Number = 5,
+			Nested = new TestClass()
+			{
+				Number = 111,
+				Nested = new TestClass()
+				{
+					Number = 222,
+					Nested = new TestClass()
+					{
+						Number = 333
+					}
+				}
+			}
+		},
 	}
 };
 
-var query = new string[] { "products", "CZ001" };
+var result = Read<int>(@object, "/nestedcollection/5/nested/nested/nested/number");
 
-object? contextObject = workOrder;
+Console.ReadKey();
 
-foreach (var item in query)
+
+T? Read<T>(object? obj, string query)
 {
-	var property = contextObject?.GetType().GetProperties().SingleOrDefault(p => p.Name.ToLower() == item.Trim().ToLower());
+	ArgumentNullException.ThrowIfNull(obj, nameof(obj));
 
-	if (property is not null)
+	string[] parts = query.TrimStart('/').Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+	var firstPart = parts.FirstOrDefault();
+
+	Type type = obj.GetType();
+
+	if (type == typeof(int) ||
+		type == typeof(string) ||
+		type == typeof(bool) ||
+		type == typeof(decimal) ||
+		type == typeof(float) ||
+		type == typeof(double))
 	{
-		if (property.PropertyType.Namespace == "System")
-			contextObject = property.GetValue(contextObject);
-		//else if (property.PropertyType.GetInterfaces().Contains(typeof(IEnumerable)))
-		//	contextObject = property.GetValue(contextObject);
-		else
-			contextObject = property.GetValue(contextObject);
+		return (T?)obj;
 	}
-	else 
+	else if (ImplementsGenericInterface(obj, typeof(IDictionary<,>)))
 	{
-		if (item.StartsWith("@"))
-		{ 
-			// handle function
-		}
-
-		if (contextObject?.GetType().GetInterfaces().Contains(typeof(IEnumerable)) ?? false)
+		if (firstPart is null)
 		{
-			foreach (var obj in (IEnumerable)contextObject)
-			{
-				var propertyWithAttribut = obj.GetType().GetProperties().SingleOrDefault(x => x.CustomAttributes.Any(x => x.AttributeType == typeof(GetAttribute)));
+			return (T?)obj;
+		}
+		else
+		{
+			var value = obj.GetType()!.GetProperty("Item")!.GetValue(obj, new object[] { firstPart });
+			return (T?)value;
+		}
+	}
+	else if (ImplementsGenericInterface(obj, typeof(IEnumerable<>)))
+	{
+		if (firstPart is null)
+		{
+			return (T?)obj;
+		}
+		else
+		{
+			// /workorders/@property(workorder)/
 
-				if (propertyWithAttribut is not null)
-					contextObject = obj;
+			if (firstPart.StartsWith("@get("))
+			{
+				
+			}
+			else
+			{
+				var typeArgs = type.GetGenericArguments();
+				var elementType = typeArgs[0];
+				var properties = elementType.GetProperties();
+
+				foreach (PropertyInfo propertyInfo in properties)
+				{
+					var attribute = propertyInfo.GetCustomAttributes(typeof(GetAttribute), true)
+						.Cast<GetAttribute>()
+						.SingleOrDefault();
+
+					if (attribute is not null)
+					{
+						var firstOrDefaultItem = FirstOrDefault((IEnumerable)obj, propertyInfo, firstPart);
+						return Read<T>(firstOrDefaultItem, string.Join("/", parts.Skip(1)));
+					}
+				}
+			}
+			
+			return (T?)obj;
+		}
+	}
+	else if (type.IsClass)
+	{
+		if (firstPart == null)
+		{
+			return (T?)obj;
+		}
+		else
+		{
+			var propertyInfo = obj.GetType().GetProperties().FirstOrDefault(p =>
+				string.Equals(p.Name.ToLower(), firstPart.ToLower(), StringComparison.Ordinal));
+
+			if (propertyInfo is null)
+			{
+				throw new Exception($"Property with name {firstPart} not found.");
+			}
+
+			return Read<T>(propertyInfo.GetValue(obj), string.Join("/", parts.Skip(1)));
+		}
+	}
+	else
+	{
+		return default(T?);
+	}
+}
+
+static bool ImplementsGenericInterface(object obj, Type interfaceType)
+{
+	Type objectType = obj.GetType();
+	Type[] interfaces = objectType.GetInterfaces();
+
+	foreach (Type i in interfaces)
+	{
+		if (i.IsGenericType && i.GetGenericTypeDefinition() == interfaceType)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+object? FirstOrDefault(IEnumerable collection, PropertyInfo property, object value)
+{
+	// Získání enumeratoru pro kolekci
+	IEnumerator enumerator = collection.GetEnumerator();
+
+	while (enumerator.MoveNext())
+	{
+		// Získání hodnoty vlastnosti pro aktuální prvek
+		var propertyValue = property.GetValue(enumerator.Current);
+
+		try
+		{
+			// Převod hodnoty "value" na typ vlastnosti
+			object convertedValue = Convert.ChangeType(value, property.PropertyType);
+
+			// Porovnání hodnoty vlastnosti s hodnotou "convertedValue"
+			if (propertyValue != null && propertyValue.Equals(convertedValue))
+			{
+				// Vrácení aktuálního prvku, pokud jeho vlastnost se shoduje s hodnotou "convertedValue"
+				return enumerator.Current;
 			}
 		}
+		catch (InvalidCastException)
+		{
+			// Ignorování chyby při převodu, pokud hodnota "value" není kompatibilní s typem vlastnosti
+		}
+	}
+
+	// Vrácení null, pokud žádný prvek v kolekci nesplňuje podmínku
+	return null;
+}
+
+
+public class TestClass
+{
+	[Get()]
+	public int Number { get; set; } = 3;
+
+	public TestClass? Nested { get; set; }
+
+	public List<TestClass> NestedCollection { get; set; } = new List<TestClass>();
+}
+
+
+[AttributeUsage(AttributeTargets.Property)]
+public class GetAttribute : Attribute
+{
+	public GetAttribute()
+	{
 
 	}
-}
-
-Console.WriteLine(contextObject.ToString());
-
-
-
-
-
-
-
-DataContext CreateDataContext()
-{
-	return new DataContext
-	{
-		WorkOrders = new List<WorkOrder> 
-		{
-			new WorkOrder { Number = "abc" }
-		}
-	};
-}
-
-class DataContext
-{
-	public IEnumerable<WorkOrder> WorkOrders { get; set; } = new List<WorkOrder>();
-}
-
-public class WorkOrder
-{
-	public string Number { get; set; } = string.Empty;
-
-	public Brand Brand { get; set; } = new Brand();
-
-	public List<Product> Products { get; set; } = new List<Product>();
-}
-
-public class Product
-{
-	[GetAttribute()]
-	public string SerialNo { get; set; } = string.Empty;
-}
-
-public class Brand
-{
-	public string Name { get; set; } = string.Empty;
 }
